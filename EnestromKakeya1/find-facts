@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# find-facts: CLI for the Isabelle Find Facts server
+# Usage: find-facts [options] <query>
+#
+# With no --field, searches across source, names, theory and session at once
+# (similar to Isabelle's find_theorems / find_consts).
+#
+# Options:
+#   -H, --host URL        Server base URL (default: http://localhost:8080)
+#   -f, --field FIELD     Restrict search to one field:
+#                           source   full Isabelle source text (default when -f given)
+#                           names    constant/type/theorem names used in a block
+#                           consts   constants (exact qualified names)
+#                           typs     types
+#                           thms     theorem names
+#                           session  session name
+#                           theory   theory name
+#                           command  command kind (lemma, definition, …)
+#                           chapter  chapter
+#                           file_type
+#   -c, --command CMD     Filter by command type (lemma, theorem, definition, ...)
+#   -s, --session SES     Filter by session name
+#   -t, --theory THY      Filter by theory name
+#   -e, --exact           Use exact match instead of full-text search
+#   -n, --num N           Max results to show (default: 10)
+#   -r, --raw             Output raw JSON
+#   -i, --id ID           Fetch a single block by id
+#   -p, --paginate        Show cursor for pagination
+#       --cursor CUR      Continue from cursor
+#   -h, --help            Show this help
+#
+# Examples:
+#   ./find-facts prime                          # search everywhere for "prime"
+#   ./find-facts --field names prime            # blocks that use a "prime" constant/type/thm
+#   ./find-facts --field consts --exact "Factorial_Ring.prime"
+#   ./find-facts --command lemma "sqrt"         # lemmas mentioning sqrt
+#   ./find-facts --session HOL-Analysis "norm"
+#   ./find-facts --id "<id>"                    # fetch full source block by id
+
+set -euo pipefail
+
+HOST="http://localhost:8080"
+FIELD=""          # empty = Any_Filter (search everywhere)
+COMMAND=""
+SESSION=""
+THEORY=""
+EXACT=false
+NUM=10
+RAW=false
+BLOCK_ID=""
+SHOW_CURSOR=false
+CURSOR=""
+QUERY=""
+
+usage() {
+  sed -n '2,44p' "$0" | sed 's/^# //' | sed 's/^#//'
+  exit 0
+}
+
+die() { echo "find-facts: $*" >&2; exit 1; }
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -H|--host)     HOST="$2"; shift 2 ;;
+    -f|--field)    FIELD="$2"; shift 2 ;;
+    -c|--command)  COMMAND="$2"; shift 2 ;;
+    -s|--session)  SESSION="$2"; shift 2 ;;
+    -t|--theory)   THEORY="$2"; shift 2 ;;
+    -e|--exact)    EXACT=true; shift ;;
+    -n|--num)      NUM="$2"; shift 2 ;;
+    -r|--raw)      RAW=true; shift ;;
+    -i|--id)       BLOCK_ID="$2"; shift 2 ;;
+    -p|--paginate) SHOW_CURSOR=true; shift ;;
+    --cursor)      CURSOR="$2"; shift 2 ;;
+    -h|--help)     usage ;;
+    -*) die "unknown option: $1" ;;
+    *)  QUERY="$1"; shift ;;
+  esac
+done
+
+# Check dependencies
+command -v curl >/dev/null 2>&1 || die "curl is required"
+command -v python3 >/dev/null 2>&1 || die "python3 is required"
+
+# ── Single block lookup ───────────────────────────────────────────────────────
+if [[ -n "$BLOCK_ID" ]]; then
+  body=$(python3 -c "import json,sys; print(json.dumps({'id': sys.argv[1]}))" "$BLOCK_ID")
+  result=$(curl -sf -X POST "$HOST/api/block" \
+    -H "Content-Type: application/json" -d "$body" 2>&1) \
+    || die "request failed: $result"
+  if $RAW; then echo "$result"; exit 0; fi
+  echo "$result" | python3 -c "
+import json, sys, re, html as html_mod
+b = json.load(sys.stdin)
+print(f\"[{b['command']}] {b.get('entity_kname','?')}\")
+print(f\"  Theory:  {b['theory']}  ({b['file_name']}:{b['start_line']})\")
+src = re.sub(r'<[^>]+>', '', b.get('html',''))
+src = html_mod.unescape(src).strip()
+if b.get('src_before','').strip():
+    print()
+    print('  Context before:')
+    for line in b['src_before'].strip().splitlines()[-3:]:
+        print('    ' + line)
+print()
+print('  ' + src.replace('\n', '\n  '))
+"
+  exit 0
+fi
+
+# ── Build query body ──────────────────────────────────────────────────────────
+[[ -z "$QUERY" ]] && die "no query given (try -h for help)"
+
+# Build an atom: either exact or full-text
+make_atom() {
+  if $EXACT; then
+    python3 -c "import json,sys; print(json.dumps({'exact': sys.argv[1]}))" "$1"
+  else
+    python3 -c "import json,sys; print(json.dumps({'value': sys.argv[1]}))" "$1"
+  fi
+}
+
+atom=$(make_atom "$QUERY")
+
+# Main filter: omit "field" key for Any_Filter (searches source+names+theory+session)
+# Include "field" key only when --field is explicitly given
+if [[ -n "$FIELD" ]]; then
+  main_filter="{\"field\": \"$FIELD\", \"either\": [$atom]}"
+else
+  main_filter="{\"either\": [$atom]}"
+fi
+
+filters="[$main_filter"
+
+# Narrow-down filters (always exact)
+if [[ -n "$COMMAND" ]]; then
+  cmd_atom=$(python3 -c "import json,sys; print(json.dumps({'exact': sys.argv[1]}))" "$COMMAND")
+  filters="$filters, {\"field\": \"command\", \"either\": [$cmd_atom]}"
+fi
+if [[ -n "$SESSION" ]]; then
+  ses_atom=$(python3 -c "import json,sys; print(json.dumps({'exact': sys.argv[1]}))" "$SESSION")
+  filters="$filters, {\"field\": \"session\", \"either\": [$ses_atom]}"
+fi
+if [[ -n "$THEORY" ]]; then
+  thy_atom=$(python3 -c "import json,sys; print(json.dumps({'exact': sys.argv[1]}))" "$THEORY")
+  filters="$filters, {\"field\": \"theory\", \"either\": [$thy_atom]}"
+fi
+
+filters="$filters]"
+
+# Choose endpoint
+if [[ -n "$CURSOR" ]]; then
+  body="{\"query\": {\"filters\": $filters, \"exclude\": [], \"selects\": []}, \"cursor\": \"$CURSOR\"}"
+  endpoint="$HOST/api/blocks"
+else
+  body="{\"filters\": $filters, \"exclude\": [], \"selects\": []}"
+  endpoint="$HOST/api/query"
+fi
+
+result=$(curl -sf -X POST "$endpoint" \
+  -H "Content-Type: application/json" -d "$body" 2>&1) \
+  || die "request failed: $result"
+
+if $RAW; then echo "$result"; exit 0; fi
+
+# ── Pretty-print results ──────────────────────────────────────────────────────
+echo "$result" | python3 -c "
+import json, sys, re, html as html_mod
+
+data   = json.load(sys.stdin)
+bdata  = data.get('blocks') if 'blocks' in data and isinstance(data['blocks'], dict) else data
+blocks = bdata.get('blocks', [])
+total  = bdata.get('num_found', '?')
+cursor = bdata.get('cursor', '')
+
+num   = int('$NUM')
+shown = blocks[:num]
+
+print(f'Found {total} result(s). Showing {len(shown)}.')
+print()
+
+for b in shown:
+    kname = b.get('entity_kname') or ''
+    cmd   = b.get('command') or ''
+    # entity_kname format: 'Theory.LocaleName.lemmaName|kind'
+    # Strip the |kind suffix for display
+    fqn = kname.split('|')[0] if kname else '?'
+
+    theory = b.get('theory', '')
+    loc    = f\"{b['file_name']}:{b['start_line']}\"
+    print(f'  [{cmd}] {fqn}')
+    print(f'    {theory}  •  {loc}')
+
+    # Strip HTML tags and unescape
+    src = re.sub(r'<[^>]+>', '', b.get('html', ''))
+    src = html_mod.unescape(src).strip()
+    # Show up to 20 lines of source
+    lines = src.splitlines()
+    for line in lines[:20]:
+        print('    ' + line)
+    if len(lines) > 20:
+        print(f'    ... ({len(lines) - 20} more lines)')
+    print()
+
+if '$SHOW_CURSOR' == 'true' and cursor:
+    print(f'Next page: --cursor \"{cursor}\"')
+"

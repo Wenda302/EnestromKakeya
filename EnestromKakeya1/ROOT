@@ -1,0 +1,6 @@
+session Sqrt2 in "." = "HOL-Complex_Analysis" +
+  sessions
+    "HOL-Computational_Algebra"
+  theories
+    AutoSh
+    EnestromKakeya
