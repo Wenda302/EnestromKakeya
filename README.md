@@ -7,4 +7,4 @@ autonomously by Claude Code (Sonnet 4.6) as a case study in *vibe proving*.
 - **EnestromKakeya2**: Elementary proof by contradiction (213 lines)
 
 For details, see the accompanying paper:
-*Formalising the Eneström–Kakeya Theorem in Isabelle/HOL: a Vibe Proving Experience from Scratch*.
+*Formalising the Eneström–Kakeya Theorem in Isabelle/HOL: a Vibe Proving Experiment from Scratch*.
